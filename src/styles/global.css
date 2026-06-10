@@ -1,0 +1,68 @@
+:root {
+  --bg:    #0f0e0c;
+  --sf:    #1a1814;
+  --sf2:   #231f19;
+  --sf3:   #2c2820;
+  --br:    #302b22;
+  --br2:   #3e3830;
+  --ink:   #f2eadb;
+  --ink2:  #9c9080;
+  --ink3:  #5c564e;
+  --ac:    #e05c2a;
+  --adim:  rgba(224, 92,  42,  0.14);
+  --gn:    #3db870;
+  --gdim:  rgba(61,  184, 112, 0.12);
+  --bl:    #4f9de0;
+  --bdim:  rgba(79,  157, 224, 0.12);
+  --am:    #e0a030;
+  --amdim: rgba(224, 160, 48,  0.12);
+  --wa:    #25D366;
+  --wadim: rgba(37,  211, 102, 0.12);
+  --safe-t: env(safe-area-inset-top,    0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --nav:   62px;
+  --hdr:   56px;
+  --radius: 14px;
+  --trans: 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: 'DM Sans', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+mark {
+  background: rgba(224, 92, 42, 0.18);
+  color: var(--ac);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+input, textarea, select, button {
+  font-family: inherit;
+}
+
+/* Shared sheet handle */
+.sheet-handle {
+  width: 36px;
+  height: 4px;
+  background: var(--br2);
+  border-radius: 4px;
+  margin: 10px auto 0;
+  flex-shrink: 0;
+}

@@ -1,0 +1,152 @@
+.wrap {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  z-index: 150;
+  display: flex;
+  flex-direction: column;
+  animation: slideIn 0.22s cubic-bezier(0.4,0,0.2,1);
+}
+@keyframes slideIn { from { transform: translateX(100%); } to { transform: none; } }
+
+.hdr {
+  height: calc(var(--hdr) + var(--safe-t));
+  padding-top: var(--safe-t);
+  background: var(--sf);
+  border-bottom: 1px solid var(--br);
+  display: flex;
+  align-items: center;
+  padding-left: 14px;
+  padding-right: 14px;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.back {
+  background: none; border: none;
+  color: var(--ink2); font-size: 24px;
+  cursor: pointer; padding: 4px; line-height: 1;
+}
+.title {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 20px; letter-spacing: 1.5px;
+  flex: 1;
+}
+.addBtn {
+  background: var(--ac); color: #fff; border: none;
+  border-radius: 8px; padding: 7px 14px;
+  font-size: 13px; font-weight: 700;
+  font-family: 'DM Sans', sans-serif; cursor: pointer;
+}
+
+.searchWrap { padding: 10px 14px 0; flex-shrink: 0; }
+.search {
+  width: 100%;
+  background: var(--sf2);
+  border: 1.5px solid var(--br);
+  color: var(--ink);
+  font-size: 15px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  outline: none;
+  font-family: 'DM Sans', sans-serif;
+  -webkit-appearance: none;
+}
+.search:focus { border-color: var(--ac); }
+
+.list {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 10px 14px;
+}
+.list::-webkit-scrollbar { display: none; }
+
+.card {
+  background: var(--sf);
+  border: 1px solid var(--br);
+  border-radius: 14px;
+  padding: 14px 16px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background var(--trans);
+}
+.card:active { background: var(--sf2); }
+.av {
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  background: var(--adim);
+  border: 1.5px solid var(--ac);
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 17px; color: var(--ac); flex-shrink: 0;
+}
+.info { flex: 1; min-width: 0; }
+.shopName { font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sub {
+  font-size: 11px; color: var(--ink3);
+  font-family: 'DM Mono', monospace;
+  margin-top: 2px;
+  display: flex; gap: 8px; flex-wrap: wrap;
+}
+.waPhone { color: var(--wa); }
+.chev { color: var(--ink3); font-size: 18px; }
+
+.empty { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 60px 20px; color: var(--ink3); gap: 10px; }
+.emptyIcon { font-size: 42px; opacity: .2; }
+
+/* Sheet */
+.shHead {
+  padding: 12px 18px 14px;
+  border-bottom: 1px solid var(--br);
+  display: flex; align-items: center;
+  flex-shrink: 0;
+}
+.shTitle { font-family: 'Bebas Neue', sans-serif; font-size: 20px; letter-spacing: 1px; flex: 1; }
+.shClose {
+  background: var(--sf2); border: none; border-radius: 50%;
+  width: 32px; height: 32px; cursor: pointer;
+  color: var(--ink2); font-size: 16px;
+  display: flex; align-items: center; justify-content: center;
+}
+.shBody {
+  flex: 1; overflow-y: auto; padding: 16px 18px 0;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.shBody::-webkit-scrollbar { display: none; }
+.fieldGroup { display: flex; flex-direction: column; gap: 5px; }
+.lbl { font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--ink2); font-weight: 600; }
+.input {
+  background: var(--sf2); border: 1.5px solid var(--br); color: var(--ink);
+  font-family: 'DM Sans', sans-serif; font-size: 16px; padding: 12px 12px;
+  border-radius: 11px; outline: none; transition: all var(--trans); width: 100%; -webkit-appearance: none;
+}
+.input:focus { border-color: var(--ac); background: var(--sf3); }
+.input::placeholder { color: var(--ink3); font-size: 14px; }
+.shFoot {
+  padding: 12px 16px; border-top: 1px solid var(--br);
+  display: flex; gap: 8px; flex-shrink: 0;
+  padding-bottom: calc(12px + var(--safe-b));
+  background: var(--sf);
+}
+.delBtn {
+  flex: 0; padding: 14px 16px; background: none;
+  border: 1.5px solid var(--br2); color: var(--ink3);
+  border-radius: 12px; cursor: pointer; font-size: 18px;
+  transition: all var(--trans);
+}
+.delBtn:active { border-color: var(--ac); color: var(--ac); }
+.cancelBtn {
+  flex: 1; background: var(--sf3); color: var(--ink);
+  border: 1px solid var(--br2); border-radius: 12px; padding: 14px 8px;
+  font-family: 'DM Sans', sans-serif; font-weight: 600; font-size: 14px; cursor: pointer;
+}
+.saveBtn {
+  flex: 2; background: var(--ac); color: #fff; border: none;
+  border-radius: 12px; padding: 14px 8px;
+  font-family: 'DM Sans', sans-serif; font-weight: 700; font-size: 14px; cursor: pointer;
+}
+.saveBtn:active { transform: scale(0.97); }

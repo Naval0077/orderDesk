@@ -1,0 +1,39 @@
+.body {
+  padding: 20px 20px calc(20px + var(--safe-b));
+}
+.title {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 20px;
+  letter-spacing: 1px;
+  margin-bottom: 8px;
+}
+.message {
+  font-size: 13px;
+  color: var(--ink2);
+  line-height: 1.5;
+  margin-bottom: 20px;
+}
+.del {
+  width: 100%;
+  background: var(--ac);
+  color: #fff;
+  border: none;
+  border-radius: 12px;
+  padding: 15px;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  margin-bottom: 10px;
+  transition: background var(--trans);
+}
+.del:active { background: #c44e22; }
+.cancel {
+  width: 100%;
+  background: var(--sf2);
+  border: 1.5px solid var(--br2);
+  color: var(--ink2);
+  border-radius: 12px;
+  padding: 14px;
+  font-size: 15px;
+  cursor: pointer;
+}
