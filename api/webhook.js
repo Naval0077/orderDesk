@@ -1,23 +1,25 @@
-import axios from 'axios'
-import admin from 'firebase-admin'
+const axios = require('axios')
 
 // ── Firebase Admin (initialize once) ─────────────────────
-if (!admin.apps.length) {
-  let serviceAccount
-  try {
-    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-  } catch (e) {
-    console.error('❌ FIREBASE_SERVICE_ACCOUNT invalid JSON:', e.message)
-  }
+let db = null
 
-  if (serviceAccount) {
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    })
+function getDb() {
+  if (db) return db
+  try {
+    const admin = require('firebase-admin')
+    if (!admin.apps.length) {
+      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+      })
+    }
+    db = admin.firestore()
+    return db
+  } catch (e) {
+    console.error('Firebase init failed:', e.message)
+    return null
   }
 }
-
-const db = admin.apps.length ? admin.firestore() : null
 
 // ── Helpers ───────────────────────────────────────────────
 function makeOrderId() {
@@ -29,9 +31,10 @@ function normalizePhone(raw) {
 }
 
 async function findShopByPhone(phone) {
-  if (!db) return null
+  const firestore = getDb()
+  if (!firestore) return null
   const normalized = normalizePhone(phone)
-  const snap = await db.collection('shops').get()
+  const snap = await firestore.collection('shops').get()
   let match = null
   snap.forEach(doc => {
     const shopPhone = normalizePhone(doc.data().whatsappNumber || '')
@@ -47,34 +50,30 @@ async function findShopByPhone(phone) {
 }
 
 async function getNextOrderNum(uid) {
-  if (!db) return 1
-  const snap = await db.collection('orders').doc(uid).collection('userOrders').get()
+  const firestore = getDb()
+  if (!firestore) return 1
+  const snap = await firestore.collection('orders').doc(uid).collection('userOrders').get()
   let max = 0
   snap.forEach(d => { if (d.data().orderNum > max) max = d.data().orderNum })
   return max + 1
 }
 
 async function downloadAsBase64(mediaId, token) {
-  // Get media URL from WhatsApp
   const infoRes = await axios.get(
     `https://graph.facebook.com/v19.0/${mediaId}`,
     { headers: { Authorization: `Bearer ${token}` } }
   )
-  const mediaUrl = infoRes.data.url
-
-  // Download binary and convert to base64
-  const mediaRes = await axios.get(mediaUrl, {
+  const mediaRes = await axios.get(infoRes.data.url, {
     responseType: 'arraybuffer',
     headers: { Authorization: `Bearer ${token}` },
   })
-
   const mimeType = mediaRes.headers['content-type'] || 'image/jpeg'
   const base64   = Buffer.from(mediaRes.data).toString('base64')
   return `data:${mimeType};base64,${base64}`
 }
 
 // ── Main handler ──────────────────────────────────────────
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN
   const WA_TOKEN     = process.env.WHATSAPP_TOKEN
   const PHONE_ID     = process.env.WHATSAPP_PHONE_ID
@@ -86,6 +85,8 @@ export default async function handler(req, res) {
     const token     = req.query['hub.verify_token']
     const challenge = req.query['hub.challenge']
 
+    console.log('Verification attempt — mode:', mode, '| token matches:', token === VERIFY_TOKEN)
+
     if (mode === 'subscribe' && token === VERIFY_TOKEN) {
       console.log('✅ Webhook verified')
       return res.status(200).send(challenge)
@@ -95,7 +96,6 @@ export default async function handler(req, res) {
 
   // ── POST — incoming message ───────────────────────────
   if (req.method === 'POST') {
-    // Always ACK immediately so WhatsApp doesn't retry
     res.status(200).json({ status: 'ok' })
 
     try {
@@ -108,10 +108,7 @@ export default async function handler(req, res) {
           if (!messages) continue
 
           for (const msg of messages) {
-            if (msg.type !== 'image') {
-              console.log(`⏭ Skipping non-image (type: ${msg.type})`)
-              continue
-            }
+            if (msg.type !== 'image') continue
 
             const fromPhone = msg.from
             const mediaId   = msg.image.id
@@ -120,54 +117,49 @@ export default async function handler(req, res) {
 
             console.log(`📨 Image from ${fromPhone}`)
 
-            // 1. Match shop
             const shop = await findShopByPhone(fromPhone)
             console.log(`🏪 Shop: ${shop ? shop.name : 'unknown'}`)
 
-            // 2. Download image
             let photo = null
             try {
               photo = await downloadAsBase64(mediaId, WA_TOKEN)
-              console.log(`🖼 Photo downloaded (${Math.round(photo.length / 1024)}KB)`)
+              console.log(`🖼 Photo ready (${Math.round(photo.length / 1024)}KB)`)
             } catch (e) {
               console.error('Photo download failed:', e.message)
             }
 
-            // 3. Save order to Firestore
-            if (db && DEFAULT_UID) {
+            const firestore = getDb()
+            if (firestore && DEFAULT_UID) {
               const orderId  = makeOrderId()
               const orderNum = await getNextOrderNum(DEFAULT_UID)
 
-              const order = {
-                id:           orderId,
-                createdAt:    timestamp,
-                shop:         shop ? shop.name : `Unknown (${fromPhone})`,
-                shopId:       shop ? shop.id   : null,
-                fromPhone,
-                status:       'pending',
-                photo,
-                source:       'whatsapp',
-                worker:       '',
-                supervisor:   '',
-                deadline:     '',
-                notes:        caption,
-                orderNum,
-                shopResolved: !!shop,
-                isBooking:    false,
-                transport:    '',
-                vehicleNum:   '',
-              }
-
-              await db
+              await firestore
                 .collection('orders')
                 .doc(DEFAULT_UID)
                 .collection('userOrders')
                 .doc(orderId)
-                .set(order)
+                .set({
+                  id:           orderId,
+                  createdAt:    timestamp,
+                  shop:         shop ? shop.name : `Unknown (${fromPhone})`,
+                  shopId:       shop ? shop.id : null,
+                  fromPhone,
+                  status:       'pending',
+                  photo,
+                  source:       'whatsapp',
+                  worker:       '',
+                  supervisor:   '',
+                  deadline:     '',
+                  notes:        caption,
+                  orderNum,
+                  shopResolved: !!shop,
+                  isBooking:    false,
+                  transport:    '',
+                  vehicleNum:   '',
+                })
 
               console.log(`✅ Order ${orderId} saved (photo: ${photo ? 'yes' : 'no'})`)
 
-              // 4. Reply to sender
               if (WA_TOKEN && PHONE_ID) {
                 const replyText = shop
                   ? `✅ Order received from *${shop.name}*. Order #${orderNum} created.`
@@ -189,8 +181,6 @@ export default async function handler(req, res) {
                   }
                 ).catch(e => console.warn('Reply failed:', e.message))
               }
-            } else {
-              console.error('❌ Firestore not initialized or DEFAULT_UID missing')
             }
           }
         }
@@ -198,10 +188,8 @@ export default async function handler(req, res) {
     } catch (err) {
       console.error('Webhook error:', err.message)
     }
-
     return
   }
 
-  // ── Other methods ─────────────────────────────────────
   res.status(405).json({ error: 'Method not allowed' })
 }
