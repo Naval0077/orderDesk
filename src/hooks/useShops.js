@@ -3,23 +3,31 @@ import { collection, doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firesto
 import { db } from '../lib/firebase'
 import { makeId } from '../lib/utils'
 
-const SHOPS_COL = collection(db, 'shops')
-
-export function useShops() {
+export function useShops(uid) {
   const [shops, setShops] = useState([])
 
   useEffect(() => {
-    const unsub = onSnapshot(SHOPS_COL, snap => {
-      const docs = []
-      snap.forEach(d => docs.push({ id: d.id, ...d.data() }))
-      setShops(docs.sort((a, b) => a.name.localeCompare(b.name)))
-    })
+    // Don't start listener until user is logged in
+    if (!uid) { setShops([]); return }
+
+    const unsub = onSnapshot(
+      collection(db, 'shops'),
+      snap => {
+        const docs = []
+        snap.forEach(d => docs.push({ id: d.id, ...d.data() }))
+        setShops(docs.sort((a, b) => a.name.localeCompare(b.name)))
+      },
+      err => {
+        console.error('Shops listener error:', err.message)
+      }
+    )
     return unsub
-  }, [])
+  }, [uid])
 
   async function saveShop(shop) {
     const id = shop.id || makeId()
-    await setDoc(doc(db, 'shops', id), { ...shop, id })
+    const data = { ...shop, id, createdAt: shop.createdAt || Date.now() }
+    await setDoc(doc(db, 'shops', id), data)
     return id
   }
 

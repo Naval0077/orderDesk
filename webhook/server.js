@@ -5,7 +5,6 @@ const cors    = require('cors');
 const admin   = require('firebase-admin');
 
 // ── Firebase Admin init ───────────────────────────────────
-// Paste your serviceAccountKey.json content into FIREBASE_SERVICE_ACCOUNT env var
 let serviceAccount;
 try {
   serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -14,13 +13,13 @@ try {
   process.exit(1);
 }
 
+console.log('🔑  Project ID:', serviceAccount.project_id);
+
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  storageBucket: process.env.FIREBASE_STORAGE_BUCKET // e.g. orderdesk-9023f.firebasestorage.app
 });
 
-const db      = admin.firestore();
-const bucket  = admin.storage().bucket();
+const db = admin.firestore();
 
 // ── Express setup ─────────────────────────────────────────
 const app = express();
@@ -28,9 +27,9 @@ app.use(cors());
 app.use(express.json());
 
 const {
-  WHATSAPP_VERIFY_TOKEN,   // any random string you set in Meta dashboard
-  WHATSAPP_TOKEN,          // your permanent WhatsApp Cloud API token
-  WHATSAPP_PHONE_ID,       // your WhatsApp Phone Number ID
+  WHATSAPP_VERIFY_TOKEN,
+  WHATSAPP_TOKEN,
+  WHATSAPP_PHONE_ID,
   PORT = 3000
 } = process.env;
 
@@ -39,16 +38,12 @@ function makeOrderId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
-// Strip non-digits and normalize phone for matching
-// WhatsApp sends numbers like "919876543210" (country code + number, no +)
 function normalizePhone(raw) {
   return String(raw).replace(/\D/g, '');
 }
 
-// Find shop in Firestore by whatsappNumber
 async function findShopByPhone(phone) {
   const normalized = normalizePhone(phone);
-  // Try exact match first, then suffix match (last 10 digits)
   const snap = await db.collection('shops').get();
   let match = null;
   snap.forEach(doc => {
@@ -64,7 +59,6 @@ async function findShopByPhone(phone) {
   return match;
 }
 
-// Get next order number across ALL orders (scan max)
 async function getNextOrderNum(uid) {
   const snap = await db.collection('orders').doc(uid).collection('userOrders').get();
   let max = 0;
@@ -72,14 +66,16 @@ async function getNextOrderNum(uid) {
   return max + 1;
 }
 
-// Download WhatsApp media and upload to Firebase Storage, return public URL
-async function downloadAndStoreMedia(mediaId) {
-  // Step 1: get media URL from WhatsApp
+// Download WhatsApp image and convert to base64 data URL
+// Stored directly in Firestore — no Firebase Storage needed
+async function downloadAsBase64(mediaId) {
+  // Step 1: get media URL
   const infoRes = await axios.get(
     `https://graph.facebook.com/v19.0/${mediaId}`,
     { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
   );
   const mediaUrl = infoRes.data.url;
+  console.log('📥  Downloading media...');
 
   // Step 2: download binary
   const mediaRes = await axios.get(mediaUrl, {
@@ -87,21 +83,12 @@ async function downloadAndStoreMedia(mediaId) {
     headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
   });
 
-  const mimeType   = mediaRes.headers['content-type'] || 'image/jpeg';
-  const ext        = mimeType.split('/')[1] || 'jpg';
-  const fileName   = `whatsapp-orders/${mediaId}.${ext}`;
-  const fileBuffer = Buffer.from(mediaRes.data);
+  const mimeType = mediaRes.headers['content-type'] || 'image/jpeg';
+  const base64   = Buffer.from(mediaRes.data).toString('base64');
+  const dataURL  = `data:${mimeType};base64,${base64}`;
 
-  // Step 3: upload to Firebase Storage
-  const file = bucket.file(fileName);
-  await file.save(fileBuffer, {
-    metadata: { contentType: mimeType },
-    public: true
-  });
-  await file.makePublic();
-
-  const publicUrl = `https://storage.googleapis.com/${bucket.name}/${fileName}`;
-  return publicUrl;
+  console.log(`🖼   Photo ready (${Math.round(base64.length / 1024)}KB)`);
+  return dataURL;
 }
 
 // ── Webhook verification (GET) ────────────────────────────
@@ -121,7 +108,6 @@ app.get('/webhook', (req, res) => {
 
 // ── Incoming WhatsApp messages (POST) ─────────────────────
 app.post('/webhook', async (req, res) => {
-  // Always ACK immediately so WhatsApp doesn't retry
   res.sendStatus(200);
 
   try {
@@ -135,36 +121,34 @@ app.post('/webhook', async (req, res) => {
         if (!messages) continue;
 
         for (const msg of messages) {
-          // Only handle image messages
-          if (msg.type !== 'image') continue;
+          if (msg.type !== 'image') {
+            console.log(`⏭   Skipping non-image message (type: ${msg.type})`);
+            continue;
+          }
 
-          const fromPhone = msg.from; // e.g. "919876543210"
+          const fromPhone = msg.from;
           const mediaId   = msg.image.id;
           const caption   = (msg.image.caption || '').trim();
           const timestamp = parseInt(msg.timestamp) * 1000 || Date.now();
 
           console.log(`📨  Image from ${fromPhone}, mediaId=${mediaId}`);
 
-          // 1. Look up shop by phone number
+          // 1. Look up shop
           const shop = await findShopByPhone(fromPhone);
+          console.log(`🏪  Shop match: ${shop ? shop.name : 'none'}`);
 
-          // 2. Download image → Firebase Storage (returns URL string)
-          let photoUrl = null;
+          // 2. Download image as base64
+          let photoData = null;
           try {
-            photoUrl = await downloadAndStoreMedia(mediaId);
-            console.log(`🖼   Stored: ${photoUrl}`);
+            photoData = await downloadAsBase64(mediaId);
           } catch (e) {
             console.error('Photo download failed:', e.message);
           }
 
-          // 3. Build order object
-          // We store it under a special "whatsapp" UID so the app can show
-          // incoming WhatsApp orders separately until assigned to a user.
-          // You can change this logic to store under a specific staff UID.
+          // 3. Build and save order
           const targetUid = process.env.DEFAULT_UID || 'whatsapp_incoming';
-
-          const orderId  = makeOrderId();
-          const orderNum = await getNextOrderNum(targetUid);
+          const orderId   = makeOrderId();
+          const orderNum  = await getNextOrderNum(targetUid);
 
           const order = {
             id:           orderId,
@@ -173,18 +157,19 @@ app.post('/webhook', async (req, res) => {
             shopId:       shop ? shop.id   : null,
             fromPhone:    fromPhone,
             status:       'pending',
-            photo:        photoUrl,
-            photoUrl:     photoUrl,     // URL reference (not base64)
+            photo:        photoData,
             source:       'whatsapp',
             worker:       '',
             supervisor:   '',
             deadline:     '',
             notes:        caption || '',
             orderNum:     orderNum,
-            shopResolved: !!shop        // flag so app can highlight unresolved
+            shopResolved: !!shop,
+            isBooking:    false,
+            transport:    '',
+            vehicleNum:   '',
           };
 
-          // 4. Save to Firestore
           await db
             .collection('orders')
             .doc(targetUid)
@@ -192,13 +177,13 @@ app.post('/webhook', async (req, res) => {
             .doc(orderId)
             .set(order);
 
-          console.log(`✅  Order ${orderId} saved (shop: ${order.shop})`);
+          console.log(`✅  Order ${orderId} saved (shop: ${order.shop}, photo: ${photoData ? 'yes' : 'no'})`);
 
-          // 5. Optional: send WhatsApp reply to confirm receipt
+          // 4. Reply to sender
           if (WHATSAPP_TOKEN && WHATSAPP_PHONE_ID) {
             const replyText = shop
               ? `✅ Order received from *${shop.name}*. Order #${orderNum} created.`
-              : `✅ Order received. Shop not found for this number — please update in OrderDesk.`;
+              : `✅ Order received. Shop not recognised — assign it in OrderDesk.`;
 
             await axios.post(
               `https://graph.facebook.com/v19.0/${WHATSAPP_PHONE_ID}/messages`,
@@ -208,18 +193,27 @@ app.post('/webhook', async (req, res) => {
                 type: 'text',
                 text: { body: replyText }
               },
-              { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+              {
+                headers: {
+                  Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+                  'Content-Type': 'application/json'
+                }
+              }
             ).catch(e => console.warn('Reply failed:', e.message));
           }
         }
       }
     }
   } catch (err) {
-    console.error('Webhook error:', err);
+    console.error('Webhook error:', err.message);
   }
 });
 
 // ── Health check ──────────────────────────────────────────
-app.get('/health', (_, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
+app.get('/health', (_, res) => res.json({
+  status: 'ok',
+  service: 'OrderDesk Webhook',
+  time: new Date().toISOString()
+}));
 
 app.listen(PORT, () => console.log(`🚀  OrderDesk webhook running on port ${PORT}`));

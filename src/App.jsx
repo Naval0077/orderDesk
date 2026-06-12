@@ -13,7 +13,7 @@ import './styles/global.css'
 export default function App() {
   const auth   = useAuth()
   const orders = useOrders(auth.user?.uid)
-  const shops  = useShops()
+  const shops  = useShops(auth.user?.uid)
   const { toasts, toast } = useToast()
   const [view, setView] = useState('orders') // 'orders' | 'shops'
 
