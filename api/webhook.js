@@ -28,6 +28,14 @@ function normalizePhone(raw) {
   return String(raw).replace(/\D/g, '')
 }
 
+// Timeout wrapper - if Firestore query takes more than 5s, skip it
+function withTimeout(promise, ms, fallback) {
+  return Promise.race([
+    promise,
+    new Promise(resolve => setTimeout(() => { console.warn(`⏱ Timed out after ${ms}ms`); resolve(fallback) }, ms))
+  ])
+}
+
 module.exports = async function handler(req, res) {
   // ── GET — verification ──────────────────────────────
   if (req.method === 'GET') {
@@ -35,40 +43,30 @@ module.exports = async function handler(req, res) {
     const token     = req.query['hub.verify_token']
     const challenge = req.query['hub.challenge']
     if (mode === 'subscribe' && token === process.env.WHATSAPP_VERIFY_TOKEN) {
-      console.log('✅ Verified')
       return res.status(200).send(challenge)
     }
     return res.status(403).send('Forbidden')
   }
 
-  // ── POST — incoming message ─────────────────────────
   if (req.method !== 'POST') return res.status(405).send('Method not allowed')
 
-  // ACK immediately
   res.status(200).json({ status: 'ok' })
 
   const WA_TOKEN    = process.env.WHATSAPP_TOKEN
   const PHONE_ID    = process.env.WHATSAPP_PHONE_ID
   const DEFAULT_UID = process.env.DEFAULT_UID
 
-  console.log('📬 POST received')
-  console.log('DEFAULT_UID:', DEFAULT_UID ? DEFAULT_UID.substring(0,8)+'...' : '❌ MISSING')
+  console.log('📬 POST received, UID:', DEFAULT_UID?.substring(0,8))
 
   try {
     const body = req.body
-    if (body?.object !== 'whatsapp_business_account') {
-      console.log('Not WA event, skipping')
-      return
-    }
+    if (body?.object !== 'whatsapp_business_account') return
 
     const messages = body?.entry?.[0]?.changes?.[0]?.value?.messages
-    if (!messages || messages.length === 0) {
-      console.log('No messages found in payload')
-      return
-    }
+    if (!messages?.length) { console.log('No messages'); return }
 
     for (const msg of messages) {
-      console.log(`📨 Message from ${msg.from}, type: ${msg.type}`)
+      console.log(`📨 ${msg.type} from ${msg.from}`)
       if (msg.type !== 'image') continue
 
       const fromPhone = msg.from
@@ -76,77 +74,78 @@ module.exports = async function handler(req, res) {
       const caption   = msg.image?.caption || ''
       const timestamp = parseInt(msg.timestamp) * 1000 || Date.now()
 
-      // Step 1: Get Firebase
-      console.log('Step 1: Getting Firebase...')
+      // Step 1: Firebase
       const admin = getAdmin()
-      if (!admin) { console.error('❌ Firebase unavailable'); continue }
+      if (!admin) { console.error('❌ No Firebase'); continue }
       const db = admin.firestore()
-      console.log('✅ Got Firestore')
 
-      // Step 2: Find shop
-      console.log('Step 2: Looking up shop for', fromPhone)
+      // Step 2: Shop lookup with 5s timeout
+      console.log('Step 2: Shop lookup...')
       let shop = null
       try {
         const normalized = normalizePhone(fromPhone)
-        const snap = await db.collection('shops').get()
-        console.log(`Found ${snap.size} shops in database`)
-        snap.forEach(doc => {
-          const data = doc.data()
-          const shopPhone = normalizePhone(data.whatsappNumber || '')
-          console.log(`  Comparing ${shopPhone} vs ${normalized}`)
-          if (
-            shopPhone === normalized ||
-            shopPhone.endsWith(normalized.slice(-10)) ||
-            normalized.endsWith(shopPhone.slice(-10))
-          ) {
-            shop = { id: doc.id, ...data }
-          }
-        })
-        console.log('🏪 Shop match:', shop ? shop.name : 'none')
+        const snap = await withTimeout(
+          db.collection('shops').get(),
+          5000,
+          null
+        )
+        if (snap) {
+          console.log(`Found ${snap.size} shops`)
+          snap.forEach(doc => {
+            const shopPhone = normalizePhone(doc.data().whatsappNumber || '')
+            if (shopPhone.endsWith(normalized.slice(-10)) || normalized.endsWith(shopPhone.slice(-10))) {
+              shop = { id: doc.id, ...doc.data() }
+            }
+          })
+        } else {
+          console.log('Shop lookup timed out, continuing without shop match')
+        }
       } catch (e) {
-        console.error('❌ Shop lookup failed:', e.message)
+        console.error('❌ Shop lookup error:', e.message)
       }
+      console.log('🏪 Shop:', shop ? shop.name : 'none')
 
       // Step 3: Download photo
-      console.log('Step 3: Downloading photo, mediaId:', mediaId)
+      console.log('Step 3: Downloading photo...')
       let photo = null
       try {
         const infoRes = await axios.get(
           `https://graph.facebook.com/v19.0/${mediaId}`,
           { headers: { Authorization: `Bearer ${WA_TOKEN}` } }
         )
-        console.log('Got media URL:', infoRes.data.url ? 'yes' : 'no')
         const mediaRes = await axios.get(infoRes.data.url, {
           responseType: 'arraybuffer',
           headers: { Authorization: `Bearer ${WA_TOKEN}` },
         })
         const mimeType = mediaRes.headers['content-type'] || 'image/jpeg'
         photo = `data:${mimeType};base64,${Buffer.from(mediaRes.data).toString('base64')}`
-        console.log(`🖼 Photo ready: ${Math.round(photo.length / 1024)}KB`)
+        console.log(`🖼 Photo: ${Math.round(photo.length / 1024)}KB`)
       } catch (e) {
-        console.error('❌ Photo download failed:', e.message)
+        console.error('❌ Photo failed:', e.message)
       }
 
-      // Step 4: Get next order number
-      console.log('Step 4: Getting next order number for UID:', DEFAULT_UID)
+      // Step 4: Next order number with timeout
+      console.log('Step 4: Getting order number...')
       let orderNum = 1
       try {
-        const snap = await db
-          .collection('orders')
-          .doc(DEFAULT_UID)
-          .collection('userOrders')
-          .get()
-        let max = 0
-        snap.forEach(d => { if ((d.data().orderNum || 0) > max) max = d.data().orderNum })
-        orderNum = max + 1
-        console.log('Next order number:', orderNum)
+        const snap = await withTimeout(
+          db.collection('orders').doc(DEFAULT_UID).collection('userOrders').get(),
+          5000,
+          null
+        )
+        if (snap) {
+          let max = 0
+          snap.forEach(d => { if ((d.data().orderNum || 0) > max) max = d.data().orderNum })
+          orderNum = max + 1
+        }
+        console.log('Order number:', orderNum)
       } catch (e) {
-        console.error('❌ Order num fetch failed:', e.message)
+        console.error('❌ Order num error:', e.message)
       }
 
       // Step 5: Save order
       const orderId = makeOrderId()
-      console.log(`Step 5: Saving order ${orderId} under UID ${DEFAULT_UID}`)
+      console.log(`Step 5: Saving ${orderId}...`)
       try {
         await db
           .collection('orders')
@@ -157,7 +156,7 @@ module.exports = async function handler(req, res) {
             id:           orderId,
             createdAt:    timestamp,
             shop:         shop ? shop.name : `Unknown (${fromPhone})`,
-            shopId:       shop ? shop.id : null,
+            shopId:       shop?.id || null,
             fromPhone,
             status:       'pending',
             photo:        photo || null,
@@ -172,26 +171,20 @@ module.exports = async function handler(req, res) {
             transport:    '',
             vehicleNum:   '',
           })
-        console.log('✅ Order saved successfully!')
+        console.log('✅ Order saved!')
       } catch (e) {
-        console.error('❌ Firestore write failed:', e.message)
+        console.error('❌ Save failed:', e.message)
         console.error(e.stack)
       }
 
       // Step 6: Reply
-      console.log('Step 6: Sending WhatsApp reply...')
       try {
         const replyText = shop
           ? `✅ Order received from *${shop.name}*. Order #${orderNum} created.`
-          : `✅ Order received. Shop not recognised — assign it in OrderDesk.`
+          : `✅ Order received. Assign shop in OrderDesk.`
         await axios.post(
           `https://graph.facebook.com/v19.0/${PHONE_ID}/messages`,
-          {
-            messaging_product: 'whatsapp',
-            to: fromPhone,
-            type: 'text',
-            text: { body: replyText },
-          },
+          { messaging_product: 'whatsapp', to: fromPhone, type: 'text', text: { body: replyText } },
           { headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } }
         )
         console.log('✅ Reply sent')
@@ -200,7 +193,6 @@ module.exports = async function handler(req, res) {
       }
     }
   } catch (err) {
-    console.error('❌ Top level error:', err.message)
-    console.error(err.stack)
+    console.error('❌ Error:', err.message, err.stack)
   }
 }
