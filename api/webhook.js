@@ -1,8 +1,5 @@
 const axios = require('axios')
 
-// ── Use Firebase REST API instead of Admin SDK ────────────
-// This avoids the gRPC/network issues with firebase-admin in Vercel serverless
-
 function makeOrderId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
 }
@@ -11,134 +8,83 @@ function normalizePhone(raw) {
   return String(raw).replace(/\D/g, '')
 }
 
-// Get a Firebase access token from service account credentials
-async function getFirebaseToken() {
-  const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-  
-  // Create JWT for service account
-  const jwt = require('jsonwebtoken')
-  const now = Math.floor(Date.now() / 1000)
-  const payload = {
+// Convert Firestore REST value to JS
+function fromFs(val) {
+  if (!val) return null
+  if ('stringValue'  in val) return val.stringValue
+  if ('integerValue' in val) return parseInt(val.integerValue)
+  if ('doubleValue'  in val) return val.doubleValue
+  if ('booleanValue' in val) return val.booleanValue
+  if ('nullValue'    in val) return null
+  if ('mapValue'     in val) {
+    const obj = {}
+    for (const k in (val.mapValue.fields || {})) obj[k] = fromFs(val.mapValue.fields[k])
+    return obj
+  }
+  if ('arrayValue' in val) return (val.arrayValue.values || []).map(fromFs)
+  return null
+}
+
+// Convert JS to Firestore REST value
+function toFs(val) {
+  if (val === null || val === undefined) return { nullValue: null }
+  if (typeof val === 'boolean') return { booleanValue: val }
+  if (typeof val === 'string')  return { stringValue: val }
+  if (typeof val === 'number')  return Number.isInteger(val) ? { integerValue: String(val) } : { doubleValue: val }
+  if (Array.isArray(val))       return { arrayValue: { values: val.map(toFs) } }
+  if (typeof val === 'object') {
+    const fields = {}
+    for (const k in val) fields[k] = toFs(val[k])
+    return { mapValue: { fields } }
+  }
+  return { nullValue: null }
+}
+
+function toFsDoc(obj) {
+  const fields = {}
+  for (const k in obj) fields[k] = toFs(obj[k])
+  return { fields }
+}
+
+// Get Firebase access token using google-auth-library style manual JWT
+async function getFirebaseToken(sa) {
+  // Build JWT manually without jsonwebtoken library
+  function base64url(str) {
+    return Buffer.from(str).toString('base64')
+      .replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
+  }
+
+  const header  = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))
+  const now     = Math.floor(Date.now() / 1000)
+  const claims  = base64url(JSON.stringify({
     iss: sa.client_email,
     sub: sa.client_email,
     aud: 'https://oauth2.googleapis.com/token',
     iat: now,
     exp: now + 3600,
     scope: 'https://www.googleapis.com/auth/datastore https://www.googleapis.com/auth/cloud-platform'
-  }
-  
-  const token = jwt.sign(payload, sa.private_key, { algorithm: 'RS256' })
-  
-  const res = await axios.post('https://oauth2.googleapis.com/token', {
-    grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-    assertion: token
-  })
-  
+  }))
+
+  const signing  = `${header}.${claims}`
+  const crypto   = require('crypto')
+  const sign     = crypto.createSign('RSA-SHA256')
+  sign.update(signing)
+  const sig      = sign.sign(sa.private_key, 'base64')
+    .replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
+
+  const jwt = `${signing}.${sig}`
+
+  console.log('JWT created, exchanging for token...')
+
+  const res = await axios.post(
+    'https://oauth2.googleapis.com/token',
+    `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 10000 }
+  )
+
   return res.data.access_token
 }
 
-// Firestore REST base URL
-function fsUrl(projectId, path) {
-  return `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/${path}`
-}
-
-// Convert Firestore REST value to JS value
-function fromFsValue(val) {
-  if (val.stringValue !== undefined) return val.stringValue
-  if (val.integerValue !== undefined) return parseInt(val.integerValue)
-  if (val.doubleValue !== undefined) return val.doubleValue
-  if (val.booleanValue !== undefined) return val.booleanValue
-  if (val.nullValue !== undefined) return null
-  if (val.mapValue) {
-    const obj = {}
-    const fields = val.mapValue.fields || {}
-    for (const k in fields) obj[k] = fromFsValue(fields[k])
-    return obj
-  }
-  if (val.arrayValue) {
-    return (val.arrayValue.values || []).map(fromFsValue)
-  }
-  return null
-}
-
-// Convert JS value to Firestore REST value
-function toFsValue(val) {
-  if (val === null || val === undefined) return { nullValue: null }
-  if (typeof val === 'string') return { stringValue: val }
-  if (typeof val === 'boolean') return { booleanValue: val }
-  if (typeof val === 'number') {
-    if (Number.isInteger(val)) return { integerValue: String(val) }
-    return { doubleValue: val }
-  }
-  if (Array.isArray(val)) return { arrayValue: { values: val.map(toFsValue) } }
-  if (typeof val === 'object') {
-    const fields = {}
-    for (const k in val) fields[k] = toFsValue(val[k])
-    return { mapValue: { fields } }
-  }
-  return { nullValue: null }
-}
-
-// Convert JS object to Firestore fields
-function toFsFields(obj) {
-  const fields = {}
-  for (const k in obj) fields[k] = toFsValue(obj[k])
-  return fields
-}
-
-// Get all shops from Firestore via REST
-async function getShops(projectId, token) {
-  try {
-    const res = await axios.get(fsUrl(projectId, 'shops'), {
-      headers: { Authorization: `Bearer ${token}` },
-      timeout: 8000
-    })
-    const docs = res.data.documents || []
-    return docs.map(doc => {
-      const data = {}
-      for (const k in (doc.fields || {})) data[k] = fromFsValue(doc.fields[k])
-      const id = doc.name.split('/').pop()
-      return { id, ...data }
-    })
-  } catch (e) {
-    console.error('❌ Get shops failed:', e.message)
-    return []
-  }
-}
-
-// Get max order number via REST
-async function getMaxOrderNum(projectId, token, uid) {
-  try {
-    const res = await axios.get(
-      fsUrl(projectId, `orders/${uid}/userOrders`),
-      {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 8000
-      }
-    )
-    const docs = res.data.documents || []
-    let max = 0
-    docs.forEach(doc => {
-      const num = doc.fields?.orderNum?.integerValue
-      if (num && parseInt(num) > max) max = parseInt(num)
-    })
-    return max + 1
-  } catch (e) {
-    console.error('❌ Get order num failed:', e.message)
-    return 1
-  }
-}
-
-// Save order via REST
-async function saveOrder(projectId, token, uid, orderId, orderData) {
-  const url = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/orders/${uid}/userOrders?documentId=${orderId}`
-  await axios.post(url, 
-    { fields: toFsFields(orderData) },
-    { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 8000 }
-  )
-}
-
-// Download WhatsApp image as base64
 async function downloadAsBase64(mediaId, waToken) {
   const infoRes = await axios.get(
     `https://graph.facebook.com/v19.0/${mediaId}`,
@@ -160,11 +106,9 @@ module.exports = async function handler(req, res) {
   const PHONE_ID     = process.env.WHATSAPP_PHONE_ID
   const DEFAULT_UID  = process.env.DEFAULT_UID
 
-  // ── GET — verification ──────────────────────────────
+  // GET — verification
   if (req.method === 'GET') {
-    const mode      = req.query['hub.mode']
-    const token     = req.query['hub.verify_token']
-    const challenge = req.query['hub.challenge']
+    const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query
     if (mode === 'subscribe' && token === VERIFY_TOKEN) {
       console.log('✅ Verified')
       return res.status(200).send(challenge)
@@ -173,7 +117,6 @@ module.exports = async function handler(req, res) {
   }
 
   if (req.method !== 'POST') return res.status(405).send('Method not allowed')
-
   res.status(200).json({ status: 'ok' })
 
   try {
@@ -181,7 +124,30 @@ module.exports = async function handler(req, res) {
     if (body?.object !== 'whatsapp_business_account') return
 
     const messages = body?.entry?.[0]?.changes?.[0]?.value?.messages
-    if (!messages?.length) { console.log('No messages in payload'); return }
+    if (!messages?.length) { console.log('No messages'); return }
+
+    // Parse service account once
+    let sa
+    try {
+      sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+      console.log('✅ SA parsed, project:', sa.project_id)
+    } catch (e) {
+      console.error('❌ SA parse failed:', e.message)
+      return
+    }
+
+    const projectId = sa.project_id
+    const BASE = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`
+
+    // Get Firebase token
+    let fbToken
+    try {
+      fbToken = await getFirebaseToken(sa)
+      console.log('✅ Firebase token obtained')
+    } catch (e) {
+      console.error('❌ Token error:', e.response?.data || e.message)
+      return
+    }
 
     for (const msg of messages) {
       console.log(`📨 ${msg.type} from ${msg.from}`)
@@ -192,82 +158,79 @@ module.exports = async function handler(req, res) {
       const caption   = msg.image?.caption || ''
       const timestamp = parseInt(msg.timestamp) * 1000 || Date.now()
 
-      // Get project ID from service account
-      const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-      const projectId = sa.project_id
-      console.log('Project:', projectId)
-
-      // Step 1: Get Firebase access token
-      console.log('Step 1: Getting Firebase token...')
-      let fbToken
-      try {
-        fbToken = await getFirebaseToken()
-        console.log('✅ Got Firebase token')
-      } catch (e) {
-        console.error('❌ Token failed:', e.message)
-        continue
-      }
-
-      // Step 2: Find shop
-      console.log('Step 2: Finding shop...')
+      // Find shop
       let shop = null
-      const normalized = normalizePhone(fromPhone)
-      const shops = await getShops(projectId, fbToken)
-      console.log(`Found ${shops.length} shops`)
-      for (const s of shops) {
-        const shopPhone = normalizePhone(s.whatsappNumber || '')
-        if (shopPhone.endsWith(normalized.slice(-10)) || normalized.endsWith(shopPhone.slice(-10))) {
-          shop = s
-          break
+      try {
+        const normalized = normalizePhone(fromPhone)
+        const r = await axios.get(`${BASE}/shops`, {
+          headers: { Authorization: `Bearer ${fbToken}` }, timeout: 8000
+        })
+        const docs = r.data.documents || []
+        console.log(`🏪 ${docs.length} shops found`)
+        for (const doc of docs) {
+          const data = {}
+          for (const k in (doc.fields || {})) data[k] = fromFs(doc.fields[k])
+          const shopPhone = normalizePhone(data.whatsappNumber || '')
+          if (shopPhone.endsWith(normalized.slice(-10)) || normalized.endsWith(shopPhone.slice(-10))) {
+            shop = { id: doc.name.split('/').pop(), ...data }
+            break
+          }
         }
+      } catch (e) {
+        console.error('❌ Shop lookup:', e.response?.status, e.message)
       }
-      console.log('🏪 Shop:', shop ? shop.name : 'none')
+      console.log('Shop:', shop ? shop.name : 'none')
 
-      // Step 3: Download photo
-      console.log('Step 3: Downloading photo...')
+      // Download photo
       let photo = null
       try {
         photo = await downloadAsBase64(mediaId, WA_TOKEN)
         console.log(`🖼 Photo: ${Math.round(photo.length / 1024)}KB`)
       } catch (e) {
-        console.error('❌ Photo failed:', e.message)
+        console.error('❌ Photo:', e.message)
       }
 
-      // Step 4: Order number
-      console.log('Step 4: Getting order number...')
-      const orderNum = await getMaxOrderNum(projectId, fbToken, DEFAULT_UID)
-      console.log('Order #:', orderNum)
-
-      // Step 5: Save order
-      const orderId = makeOrderId()
-      console.log(`Step 5: Saving order ${orderId}...`)
+      // Get order number
+      let orderNum = 1
       try {
-        await saveOrder(projectId, fbToken, DEFAULT_UID, orderId, {
-          id:           orderId,
-          createdAt:    timestamp,
-          shop:         shop ? shop.name : `Unknown (${fromPhone})`,
-          shopId:       shop?.id || null,
-          fromPhone,
-          status:       'pending',
-          photo:        photo || null,
-          source:       'whatsapp',
-          worker:       '',
-          supervisor:   '',
-          deadline:     '',
-          notes:        caption,
-          orderNum,
-          shopResolved: !!shop,
-          isBooking:    false,
-          transport:    '',
-          vehicleNum:   '',
+        const r = await axios.get(`${BASE}/orders/${DEFAULT_UID}/userOrders`, {
+          headers: { Authorization: `Bearer ${fbToken}` }, timeout: 8000
         })
+        const docs = r.data.documents || []
+        let max = 0
+        docs.forEach(d => {
+          const n = parseInt(d.fields?.orderNum?.integerValue || 0)
+          if (n > max) max = n
+        })
+        orderNum = max + 1
+        console.log('Order #:', orderNum)
+      } catch (e) {
+        console.error('❌ Order num:', e.message)
+      }
+
+      // Save order
+      const orderId = makeOrderId()
+      try {
+        await axios.post(
+          `${BASE}/orders/${DEFAULT_UID}/userOrders?documentId=${orderId}`,
+          toFsDoc({
+            id: orderId, createdAt: timestamp,
+            shop: shop ? shop.name : `Unknown (${fromPhone})`,
+            shopId: shop?.id || null, fromPhone,
+            status: 'pending', photo: photo || null,
+            source: 'whatsapp', worker: '', supervisor: '',
+            deadline: '', notes: caption, orderNum,
+            shopResolved: !!shop, isBooking: false,
+            transport: '', vehicleNum: '',
+          }),
+          { headers: { Authorization: `Bearer ${fbToken}`, 'Content-Type': 'application/json' }, timeout: 8000 }
+        )
         console.log('✅ Order saved!')
       } catch (e) {
-        console.error('❌ Save failed:', e.message)
-        console.error(e.stack)
+        console.error('❌ Save failed:', e.response?.data || e.message)
       }
 
-      // Step 6: Reply
+      // Reply
       try {
         const replyText = shop
           ? `✅ Order from *${shop.name}*. Order #${orderNum} created.`
@@ -279,7 +242,7 @@ module.exports = async function handler(req, res) {
         )
         console.log('✅ Reply sent')
       } catch (e) {
-        console.warn('⚠️ Reply failed:', e.message)
+        console.warn('⚠️ Reply:', e.message)
       }
     }
   } catch (err) {
