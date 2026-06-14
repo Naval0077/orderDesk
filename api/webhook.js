@@ -1,5 +1,28 @@
 const axios = require('axios')
 
+// ── Body parser helper ────────────────────────────────────
+function parseBody(req) {
+  return new Promise((resolve, reject) => {
+    // Already parsed by Vercel
+    if (req.body && typeof req.body === 'object') {
+      return resolve(req.body)
+    }
+    // Parse raw string
+    if (req.body && typeof req.body === 'string') {
+      try { return resolve(JSON.parse(req.body)) }
+      catch (e) { return reject(new Error('Invalid JSON string')) }
+    }
+    // Read stream
+    let data = ''
+    req.on('data', chunk => { data += chunk })
+    req.on('end', () => {
+      try { resolve(data ? JSON.parse(data) : {}) }
+      catch (e) { reject(new Error('Invalid JSON: ' + data.slice(0, 100))) }
+    })
+    req.on('error', reject)
+  })
+}
+
 function makeOrderId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
 }
@@ -8,7 +31,6 @@ function normalizePhone(raw) {
   return String(raw).replace(/\D/g, '')
 }
 
-// Convert Firestore REST value to JS
 function fromFs(val) {
   if (!val) return null
   if ('stringValue'  in val) return val.stringValue
@@ -25,7 +47,6 @@ function fromFs(val) {
   return null
 }
 
-// Convert JS to Firestore REST value
 function toFs(val) {
   if (val === null || val === undefined) return { nullValue: null }
   if (typeof val === 'boolean') return { booleanValue: val }
@@ -46,42 +67,31 @@ function toFsDoc(obj) {
   return { fields }
 }
 
-// Get Firebase access token using google-auth-library style manual JWT
 async function getFirebaseToken(sa) {
-  // Build JWT manually without jsonwebtoken library
   function base64url(str) {
     return Buffer.from(str).toString('base64')
       .replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
   }
-
-  const header  = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))
-  const now     = Math.floor(Date.now() / 1000)
-  const claims  = base64url(JSON.stringify({
-    iss: sa.client_email,
-    sub: sa.client_email,
+  const now    = Math.floor(Date.now() / 1000)
+  const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))
+  const claims = base64url(JSON.stringify({
+    iss: sa.client_email, sub: sa.client_email,
     aud: 'https://oauth2.googleapis.com/token',
-    iat: now,
-    exp: now + 3600,
+    iat: now, exp: now + 3600,
     scope: 'https://www.googleapis.com/auth/datastore https://www.googleapis.com/auth/cloud-platform'
   }))
-
-  const signing  = `${header}.${claims}`
-  const crypto   = require('crypto')
-  const sign     = crypto.createSign('RSA-SHA256')
-  sign.update(signing)
-  const sig      = sign.sign(sa.private_key, 'base64')
+  const crypto = require('crypto')
+  const sign   = crypto.createSign('RSA-SHA256')
+  sign.update(`${header}.${claims}`)
+  const sig = sign.sign(sa.private_key, 'base64')
     .replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
-
-  const jwt = `${signing}.${sig}`
-
-  console.log('JWT created, exchanging for token...')
+  const jwt = `${header}.${claims}.${sig}`
 
   const res = await axios.post(
     'https://oauth2.googleapis.com/token',
     `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
     { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 10000 }
   )
-
   return res.data.access_token
 }
 
@@ -117,20 +127,34 @@ module.exports = async function handler(req, res) {
   }
 
   if (req.method !== 'POST') return res.status(405).send('Method not allowed')
+
+  // Parse body first
+  let body
+  try {
+    body = await parseBody(req)
+    console.log('📬 Body parsed, object:', body?.object)
+  } catch (e) {
+    console.error('❌ Body parse error:', e.message)
+    return res.status(200).json({ status: 'ok' }) // always 200 to Meta
+  }
+
+  // ACK to Meta
   res.status(200).json({ status: 'ok' })
 
   try {
-    const body = req.body
-    if (body?.object !== 'whatsapp_business_account') return
+    if (body?.object !== 'whatsapp_business_account') {
+      console.log('Not WA event:', body?.object)
+      return
+    }
 
     const messages = body?.entry?.[0]?.changes?.[0]?.value?.messages
-    if (!messages?.length) { console.log('No messages'); return }
+    if (!messages?.length) { console.log('No messages in payload'); return }
 
-    // Parse service account once
+    // Parse service account
     let sa
     try {
       sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-      console.log('✅ SA parsed, project:', sa.project_id)
+      console.log('✅ SA parsed:', sa.project_id)
     } catch (e) {
       console.error('❌ SA parse failed:', e.message)
       return
@@ -145,7 +169,7 @@ module.exports = async function handler(req, res) {
       fbToken = await getFirebaseToken(sa)
       console.log('✅ Firebase token obtained')
     } catch (e) {
-      console.error('❌ Token error:', e.response?.data || e.message)
+      console.error('❌ Token failed:', e.response?.data || e.message)
       return
     }
 
@@ -166,7 +190,7 @@ module.exports = async function handler(req, res) {
           headers: { Authorization: `Bearer ${fbToken}` }, timeout: 8000
         })
         const docs = r.data.documents || []
-        console.log(`🏪 ${docs.length} shops found`)
+        console.log(`🏪 ${docs.length} shops in DB`)
         for (const doc of docs) {
           const data = {}
           for (const k in (doc.fields || {})) data[k] = fromFs(doc.fields[k])
@@ -176,10 +200,10 @@ module.exports = async function handler(req, res) {
             break
           }
         }
+        console.log('Shop:', shop ? shop.name : 'none')
       } catch (e) {
         console.error('❌ Shop lookup:', e.response?.status, e.message)
       }
-      console.log('Shop:', shop ? shop.name : 'none')
 
       // Download photo
       let photo = null
@@ -206,10 +230,12 @@ module.exports = async function handler(req, res) {
         console.log('Order #:', orderNum)
       } catch (e) {
         console.error('❌ Order num:', e.message)
+        orderNum = Date.now() % 1000 // fallback
       }
 
       // Save order
       const orderId = makeOrderId()
+      console.log(`💾 Saving ${orderId}...`)
       try {
         await axios.post(
           `${BASE}/orders/${DEFAULT_UID}/userOrders?documentId=${orderId}`,
@@ -223,11 +249,14 @@ module.exports = async function handler(req, res) {
             shopResolved: !!shop, isBooking: false,
             transport: '', vehicleNum: '',
           }),
-          { headers: { Authorization: `Bearer ${fbToken}`, 'Content-Type': 'application/json' }, timeout: 8000 }
+          {
+            headers: { Authorization: `Bearer ${fbToken}`, 'Content-Type': 'application/json' },
+            timeout: 8000
+          }
         )
         console.log('✅ Order saved!')
       } catch (e) {
-        console.error('❌ Save failed:', e.response?.data || e.message)
+        console.error('❌ Save failed:', e.response?.status, e.response?.data || e.message)
       }
 
       // Reply
