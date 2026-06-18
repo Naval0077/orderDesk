@@ -30,6 +30,7 @@ const {
   WHATSAPP_VERIFY_TOKEN,
   WHATSAPP_TOKEN,
   WHATSAPP_PHONE_ID,
+  DEFAULT_UID,
   PORT = 3000
 } = process.env;
 
@@ -66,10 +67,8 @@ async function getNextOrderNum(uid) {
   return max + 1;
 }
 
-// Download WhatsApp image and convert to base64 data URL
-// Stored directly in Firestore — no Firebase Storage needed
+// Download WhatsApp image and convert to base64 — no Storage bucket needed
 async function downloadAsBase64(mediaId) {
-  // Step 1: get media URL
   const infoRes = await axios.get(
     `https://graph.facebook.com/v19.0/${mediaId}`,
     { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
@@ -77,7 +76,6 @@ async function downloadAsBase64(mediaId) {
   const mediaUrl = infoRes.data.url;
   console.log('📥  Downloading media...');
 
-  // Step 2: download binary
   const mediaRes = await axios.get(mediaUrl, {
     responseType: 'arraybuffer',
     headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
@@ -108,6 +106,7 @@ app.get('/webhook', (req, res) => {
 
 // ── Incoming WhatsApp messages (POST) ─────────────────────
 app.post('/webhook', async (req, res) => {
+  // Always ACK immediately so WhatsApp doesn't retry
   res.sendStatus(200);
 
   try {
@@ -146,9 +145,9 @@ app.post('/webhook', async (req, res) => {
           }
 
           // 3. Build and save order
-          const targetUid = process.env.DEFAULT_UID || 'whatsapp_incoming';
-          const orderId   = makeOrderId();
-          const orderNum  = await getNextOrderNum(targetUid);
+          const targetUid = DEFAULT_UID || 'whatsapp_incoming';
+          const orderId    = makeOrderId();
+          const orderNum   = await getNextOrderNum(targetUid);
 
           const order = {
             id:           orderId,
@@ -162,7 +161,7 @@ app.post('/webhook', async (req, res) => {
             worker:       '',
             supervisor:   '',
             deadline:     '',
-            notes:        caption || '',
+            notes:        caption,
             orderNum:     orderNum,
             shopResolved: !!shop,
             isBooking:    false,
@@ -183,7 +182,7 @@ app.post('/webhook', async (req, res) => {
           if (WHATSAPP_TOKEN && WHATSAPP_PHONE_ID) {
             const replyText = shop
               ? `✅ Order received from *${shop.name}*. Order #${orderNum} created.`
-              : `✅ Order received. Shop not recognised — assign it in OrderDesk.`;
+              : `✅ Order received. Shop not recognised — please assign it in OrderDesk.`;
 
             await axios.post(
               `https://graph.facebook.com/v19.0/${WHATSAPP_PHONE_ID}/messages`,
